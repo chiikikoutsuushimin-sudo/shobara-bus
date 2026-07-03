@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>庄原市 バス現在地マップ</title>
+    <link rel="stylesheet" href="./leaflet/leaflet.css" />
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; font-family: 'Meiryo', sans-serif; }
+        #container { display: flex; width: 100%; height: 100%; }
+        
+        /* スマホ対応：画面が狭い時はサイドバーの幅を調整 */
+        #sidebar { width: 340px; background: #f8f9fa; padding: 20px; box-sizing: border-box; overflow-y: auto; border-right: 1px solid #ccc; z-index: 1000; box-shadow: 2px 0 5px rgba(0,0,0,0.1); }
+        @media (max-width: 768px) {
+            #container { flex-direction: column-reverse; }
+            #sidebar { width: 100%; height: 40%; border-right: none; border-top: 2px solid #0284c7; }
+            #map { width: 100%; height: 60%; }
+        }
+
+        #map { flex-grow: 1; height: 100%; background: #e5e5e5; }
+        h3 { margin-top: 0; border-bottom: 2px solid #0284c7; padding-bottom: 10px; color: #0f172a; }
+        
+        #today-mode-badge { margin-bottom: 15px; padding: 8px; border-radius: 6px; font-size: 13px; font-weight: bold; text-align: center; border: 1px solid #ccc; }
+
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; background: #fff; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
+        th { background: #eee; }
+        .next-bus { background-color: #ffe066 !important; font-weight: bold; border: 2px solid #f5b700; }
+        .custom-bus-icon { background: none; border: none; }
+        
+        .compact-status { margin-bottom: 20px; border: 1px solid #ddd; background: #fff; border-radius: 6px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .compact-status-title { background: #0284c7; color: #fff; padding: 8px 10px; font-size: 14px; font-weight: bold; }
+        .compact-status-content { padding: 8px 10px; font-size: 13px; max-height: 200px; overflow-y: auto; }
+        
+        .status-none { color: #94a3b8; font-style: italic; text-align: center; padding: 10px; }
+        .status-item { margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px dashed #eee; line-height: 1.5; }
+        .status-item:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
+        .time-label { color: #64748b; font-size: 11px; margin-left: 2px; }
+        
+        .moving-bus-icon { background: none; border: none; }
+        .bus-tooltip { background-color: rgba(0,0,0,0.85); color: white; border: none; border-radius: 6px; font-size: 13px; padding: 8px 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.4); white-space: nowrap; line-height: 1.4; }
+        .bus-tooltip::before { border-top-color: rgba(0,0,0,0.85); }
+
+        #loading-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.9); z-index: 9999; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+        .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #0284c7; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin-bottom: 15px; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+
+<div id="loading-overlay">
+    <div class="spinner"></div>
+    <div style="font-weight: bold; color: #333;">運行データを読み込み中...</div>
+</div>
+
+<div id="container">
+    <div id="sidebar">
+        <h3>🚌 バスマップ庄原</h3>
+        
+        <div id="today-mode-badge">ダイヤ状況を計算中...</div>
+
+        <div class="compact-status">
+            <div class="compact-status-title">🚍 現在走行中のバス</div>
+            <div id="overall-status-panel" class="compact-status-content status-none">待機中</div>
+        </div>
+
+        <div id="info-content" style="margin-top: 20px;">
+            <div style="text-align: center; color: #64748b; font-size: 12px; padding: 20px;">
+                地図上のバス停マーク（🚏）をタップすると<br>時刻表が表示されます。
+            </div>
+        </div>
+    </div>
+    <div id="map"></div>
+</div>
+
+<script src="./leaflet/leaflet.js"></script>
+<script src="./xlsx.full.min.js"></script>
+
+<script>
+    // ★設定：ここで読み込むエクセルファイルを指定します。複数ある場合はカンマで区切って追加できます。
+    // 例: ['./市内循環(ひまわり).xlsx', './別の路線.xlsx']
+    const targetFiles = [
+        './市内循環(ひまわり).xlsx'
+    ];
+
+    var map = L.map('map').setView([34.856, 133.015], 14);
+    var layerGroup = L.layerGroup().addTo(map);
+    var activeBusesLayer = L.layerGroup().addTo(map); 
+
+    // ★変更：tilesフォルダではなく、国土地理院のオンラインサーバーから直接地図を取得
+    L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
+        maxZoom: 18,
+        attribution: "<a href='https://maps.gsi.go.jp/development/ichiran.html' target='_blank'>国土地理院</a>"
+    }).addTo(map);
+
+    function createBusIcon(color) {
+        return L.divIcon({
+            html: `<div style="background-color: ${color}; width: 22px; height: 22px; border-radius: 50%; border: 2px solid white; display: flex; align-items: center; justify-content: center; font-size: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.4);">🚏</div>`,
+            className: 'custom-bus-icon', iconSize: [26, 26], iconAnchor: [13, 13]
+        });
+    }
+
+    var routeColors = {};
+    var routeSchedules = {}; 
+    var fileStats = {}; 
+    var colorPalette = ['#e63946', '#457b9d', '#2a9d8f', '#f4a261', '#8338ec', '#ffb703', '#e76f51', '#219ebc'];
+    
+    var globalBusData = []; 
+    var flightSettings = {}; 
+
+    // ★自動読み込み処理
+    document.addEventListener("DOMContentLoaded", function() {
+        updateDayModeBadge();
+        loadExcelFiles();
+    });
+
+    function loadExcelFiles() {
+        Promise.all(targetFiles.map(url => fetch(url).then(res => {
+            if (!res.ok) throw new Error("File not found: " + url);
+            return res.arrayBuffer().then(data => ({url: url, data: data}));
+        }))).then(results => {
+            results.forEach(result => {
+                var data = new Uint8Array(result.data);
+                var workbook = XLSX.read(data, {type: 'array'});
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+                
+                var sheetData = XLSX.utils.sheet_to_json(worksheet, {defval: "", raw: false});
+                
+                // ファイル名から「.xlsx」を取り除いて表示名にする
+                var fileNameParts = result.url.split('/');
+                var rawFileName = fileNameParts[fileNameParts.length - 1];
+                var displayName = rawFileName.replace(/\.xlsx?$/, '').replace(/\.csv$/, '');
+                
+                var cleanData = [];
+                flightSettings[displayName] = {}; 
+                
+                sheetData.forEach(function(row) {
+                    if (row["バス停"] === "【運行日】") {
+                        Object.keys(row).forEach(function(key) {
+                            if (key.indexOf('便') !== -1) {
+                                flightSettings[displayName][key] = flightSettings[displayName][key] || {};
+                                flightSettings[displayName][key].activeDays = row[key];
+                            }
+                        });
+                    } else if (row["バス停"] === "【運休日】") {
+                        Object.keys(row).forEach(function(key) {
+                            if (key.indexOf('便') !== -1) {
+                                flightSettings[displayName][key] = flightSettings[displayName][key] || {};
+                                flightSettings[displayName][key].suspendDays = row[key];
+                            }
+                        });
+                    } else {
+                        row.sourceFileDisplayName = displayName;
+                        cleanData.push(row);
+                    }
+                });
+                globalBusData = globalBusData.concat(cleanData);
+            });
+
+            // 読み込み完了後の処理
+            document.getElementById('loading-overlay').style.display = 'none';
+            drawUniversalMap(globalBusData); 
+            buildSchedules(globalBusData);
+            updateActiveBuses();
+
+        }).catch(err => {
+            console.error(err);
+            document.getElementById('loading-overlay').innerHTML = `<div style="color:red; font-weight:bold;">ダイヤデータ（${targetFiles.join(', ')}）が見つかりません。<br>サーバーの設定を確認してください。</div>`;
+        });
+    }
+
+    function isTodaySuspended(exceptionStr, simDate) {
+        if (!exceptionStr) return false;
+        var m = simDate.getMonth() + 1;
+        var d = simDate.getDate();
+        var y = simDate.getFullYear();
+
+        var str = String(exceptionStr).replace(/[ \s]/g, '').replace(/[０-９／月日ー〜]/g, function(s) {
+            var map = {'月':'/', '日':'', 'ー':'-', '〜':'-', '～':'-'};
+            if(map[s] !== undefined) return map[s];
+            return String.fromCharCode(s.charCodeAt(0) - 0xFEE0);
+        });
+
+        var parts = str.split(',');
+        for (var i = 0; i < parts.length; i++) {
+            var part = parts[i];
+            var match = part.match(/^(\d{1,2})\/(\d{1,2})$/);
+            if (match) {
+                if (parseInt(match[1]) === m && parseInt(match[2]) === d) return true;
+            }
+            var rangeMatch = part.match(/^(\d{1,2})\/(\d{1,2})-(\d{1,2})\/(\d{1,2})$/);
+            if (rangeMatch) {
+                var sm = parseInt(rangeMatch[1]), sd = parseInt(rangeMatch[2]);
+                var em = parseInt(rangeMatch[3]), ed = parseInt(rangeMatch[4]);
+                var start = new Date(y, sm-1, sd);
+                var end = new Date(y, em-1, ed);
+                if (end < start) end.setFullYear(y + 1);
+                var checkDate = new Date(y, m-1, d);
+                if (m === 1 && sm === 12) checkDate.setFullYear(y + 1);
+                if (checkDate >= start && checkDate <= end) return true;
+            }
+        }
+        return false;
+    }
+
+    function isFlightActiveToday(settingObj) {
+        if (!settingObj) settingObj = {};
+        var daySetting = settingObj.activeDays || "毎日";
+        var suspendSetting = settingObj.suspendDays || "";
+        
+        var today = new Date(); // 完全リアルタイム
+        
+        if (isTodaySuspended(suspendSetting, today)) return false;
+
+        var d = today.getDay();
+        var todayStr = ["日", "月", "火", "水", "木", "金", "土"][d];
+        var isWknd = (d === 0 || d === 6);
+
+        if (daySetting === "毎日") return true;
+        if (daySetting === "平日") return !isWknd;
+        if (daySetting === "土日休" || daySetting === "土日") return isWknd;
+        if (daySetting.indexOf(todayStr) !== -1) return true;
+
+        return false;
+    }
+
+    function updateDayModeBadge() {
+        var badge = document.getElementById('today-mode-badge');
+        var today = new Date();
+        var d = today.getDay();
+        var todayStr = ["日", "月", "火", "水", "木", "金", "土"][d];
+        var isWknd = (d === 0 || d === 6);
+        
+        // 祝日判定API等がないため、土日かどうかで簡易表示
+        var dialyMode = isWknd ? "土日・休日ダイヤ" : "平日ダイヤ";
+        
+        badge.innerHTML = `📅 本日は <b>${dialyMode}</b>（${todayStr}曜）で運行中`;
+        badge.style.background = isWknd ? "#fef2f2" : "#f0fdf4";
+        badge.style.borderColor = isWknd ? "#fecaca" : "#bbf7d0";
+        badge.style.color = isWknd ? "#991b1b" : "#166534";
+    }
+
+    // 常に現在時刻を返す
+    function getCurrentMinutes() {
+        var now = new Date();
+        return now.getHours() * 60 + now.getMinutes() + (now.getSeconds() / 60);
+    }
+
+    function formatTime(minutes) {
+        var h = Math.floor(minutes / 60);
+        var m = Math.floor(minutes % 60);
+        return (h < 10 ? '0' + h : h) + ':' + (m < 10 ? '0' + m : m);
+    }
+
+    function drawUniversalMap(busData) {
+        layerGroup.clearLayers();
+        routeColors = {};
+        var routeCoords = {};
+        var colorIndex = 0;
+        var allPoints = []; 
+
+        busData.forEach(function(stop) {
+            var lat = parseFloat(stop.Y);
+            var lon = parseFloat(stop.X);
+            var rawRoute = stop.ルート || "未分類";
+            if (isNaN(lat) || isNaN(lon)) return;
+
+            var routes = rawRoute.split(/[,、]/).map(r => r.trim()).filter(r => r);
+
+            routes.forEach(function(r) {
+                if (!routeCoords[r]) {
+                    routeCoords[r] = [];
+                    routeColors[r] = colorPalette[colorIndex % colorPalette.length];
+                    colorIndex++;
+                }
+                routeCoords[r].push([lat, lon]);
+            });
+
+            allPoints.push([lat, lon]);
+            var markerColor = routes.length === 1 ? routeColors[routes[0]] : '#666666';
+            var marker = L.marker([lat, lon], { icon: createBusIcon(markerColor) }).addTo(layerGroup);
+            
+            marker.on('click', function() { displayUniversalTimetable(stop, markerColor, rawRoute, stop.sourceFileDisplayName); });
+        });
+
+        for (var routeName in routeCoords) {
+            if (routeCoords[routeName].length > 1) {
+                L.polyline(routeCoords[routeName], {color: routeColors[routeName], weight: 5, opacity: 0.5}).addTo(layerGroup);
+            }
+        }
+        if (allPoints.length > 0) map.fitBounds(allPoints);
+    }
+
+    function buildSchedules(busData) {
+        routeSchedules = {};
+        fileStats = {}; 
+        var routeStops = {};
+        
+        busData.forEach(function(stop) {
+            var rawRoute = stop.ルート || "未分類";
+            var displayName = stop.sourceFileDisplayName || "不明";
+            
+            if (!fileStats[displayName]) {
+                fileStats[displayName] = { minTime: Infinity, maxTime: 0, isActive: false };
+            }
+
+            var routes = rawRoute.split(/[,、]/).map(r => r.trim()).filter(r => r);
+            routes.forEach(r => {
+                if (!routeStops[r]) routeStops[r] = { stops: [], sourceFile: displayName };
+                routeStops[r].stops.push(stop);
+            });
+        });
+
+        for (var route in routeStops) {
+            routeSchedules[route] = { sourceFile: routeStops[route].sourceFile, flights: [] };
+            var stops = routeStops[route].stops;
+            var displayName = routeStops[route].sourceFile;
+            
+            if (stops.length === 0) continue;
+
+            var architecturalKeys = Object.keys(stops[0]);
+            var allFlightKeys = architecturalKeys.filter(k => k.indexOf('便') !== -1);
+            
+            var settings = flightSettings[displayName] || {};
+            
+            var flightKeys = allFlightKeys.filter(function(key) {
+                return isFlightActiveToday(settings[key]);
+            });
+            
+            if (flightKeys.length === 0) continue; 
+
+            flightKeys.forEach(function(key) {
+                var flightSchedule = [];
+                stops.forEach(function(stop) {
+                    var timeStr = String(stop[key] || "");
+                    if (timeStr && timeStr.indexOf(':') !== -1) {
+                        var parts = timeStr.split(':');
+                        var minutes = parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10);
+                        flightSchedule.push({
+                            name: stop.バス停, lat: parseFloat(stop.Y), lon: parseFloat(stop.X), time: minutes
+                        });
+                    }
+                });
+                
+                if (flightSchedule.length > 1) {
+                    flightSchedule.sort((a, b) => a.time - b.time); 
+                    routeSchedules[route].flights.push({ flightName: key, stops: flightSchedule });
+                    
+                    var lastTime = flightSchedule[flightSchedule.length - 1].time;
+                    var firstTime = flightSchedule[0].time;
+                    
+                    if (lastTime > fileStats[displayName].maxTime) fileStats[displayName].maxTime = lastTime;
+                    if (firstTime < fileStats[displayName].minTime) fileStats[displayName].minTime = firstTime;
+                }
+            });
+        }
+    }
+
+    function updateActiveBuses() {
+        if (globalBusData.length === 0) return;
+
+        activeBusesLayer.clearLayers();
+        var currentMinutes = getCurrentMinutes();
+        var runningBusStrings = []; 
+
+        for (var fName in fileStats) {
+            fileStats[fName].isActive = false;
+        }
+
+        for (var route in routeSchedules) {
+            var routeColor = routeColors[route] || '#333';
+            var routeInfo = routeSchedules[route];
+            var displayName = routeInfo.sourceFile;
+            
+            routeInfo.flights.forEach(function(flight) {
+                var stops = flight.stops;
+                var startTime = stops[0].time;
+                var endTime = stops[stops.length - 1].time;
+
+                if (currentMinutes >= startTime && currentMinutes <= endTime) {
+                    if (fileStats[displayName]) fileStats[displayName].isActive = true;
+
+                    for (var i = 0; i < stops.length - 1; i++) {
+                        var s1 = stops[i];
+                        var s2 = stops[i+1];
+                        if (currentMinutes >= s1.time && currentMinutes < s2.time) {
+                            
+                            var progress = (currentMinutes - s1.time) / (s2.time - s1.time);
+                            var currentLat = s1.lat + (s2.lat - s1.lat) * progress;
+                            var currentLon = s1.lon + (s2.lon - s1.lon) * progress;
+
+                            var busIcon = L.divIcon({
+                                html: `<div style="background-color: ${routeColor}; width: 34px; height: 34px; border-radius: 8px; border: 2px solid white; display: flex; align-items: center; justify-content: center; font-size: 20px; box-shadow: 0 4px 8px rgba(0,0,0,0.5); z-index: 9999;">🚍</div>`,
+                                className: 'moving-bus-icon',
+                                iconSize: [38, 38],
+                                iconAnchor: [19, 19]
+                            });
+                            
+                            var marker = L.marker([currentLat, currentLon], {icon: busIcon, zIndexOffset: 1000}).addTo(activeBusesLayer);
+                            
+                            var popupContent = `<div style="text-align:center;"><b>${route} ${flight.flightName}</b><br/><span style="color:#ffd166;">${s1.name}</span> 発<br/>⬇<br/><span style="font-size:10px; color:#aaa;">NEXT</span> <span style="color:#06d6a0; font-size:14px; font-weight:bold;">${s2.name}</span></div>`;
+                            marker.bindTooltip(popupContent, {permanent: true, direction: 'top', offset: [0, -20], className: 'bus-tooltip'}).openTooltip();
+                            
+                            var t1 = formatTime(s1.time);
+                            var t2 = formatTime(s2.time);
+                            runningBusStrings.push(`<div class="status-item"><span style="color:${routeColor}; font-weight:bold;">${route}</span> ${flight.flightName} <br> ${s1.name} <span class="time-label">(${t1}発)</span> ➡ <b>${s2.name}</b> <span class="time-label">(${t2}着)</span></div>`);
+                            
+                            break; 
+                        }
+                    }
+                }
+            });
+        }
+
+        var board = document.getElementById('overall-status-panel');
+        if (runningBusStrings.length > 0) {
+            board.innerHTML = runningBusStrings.join("");
+            board.classList.remove('status-none');
+        } else {
+            board.innerHTML = "現在走行中のバスはありません";
+            board.classList.add('status-none');
+        }
+    }
+
+    // 5秒ごとに現在位置を更新（リアルタイム）
+    setInterval(updateActiveBuses, 5000);
+
+    function displayUniversalTimetable(stop, markerColor, route, displayName) {
+        var currentMinutes = Math.floor(getCurrentMinutes());
+        var nextBusKey = null;
+        var minDiff = Infinity;
+
+        var architecturalKeys = Object.keys(stop);
+        var allFlightKeys = architecturalKeys.filter(k => k.indexOf('便') !== -1);
+        
+        var settings = flightSettings[displayName] || {};
+        
+        var flightKeys = allFlightKeys.filter(function(key) {
+            return isFlightActiveToday(settings[key]);
+        });
+
+        var tableHTML = '<table><tr><th>便名</th><th>発車時刻</th></tr>';
+        
+        if (flightKeys.length === 0) {
+            tableHTML += '<tr><td colspan="2" style="color:#ef4444; font-weight:bold;">本日の運行はありません</td></tr>';
+        } else {
+            flightKeys.forEach(function(key) {
+                var timeStr = String(stop[key] || "");
+                if (timeStr && timeStr.indexOf(':') !== -1) {
+                    var parts = timeStr.split(':'); 
+                    var busMinutes = parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10);
+                    var diff = busMinutes - currentMinutes;
+                    
+                    if (diff >= 0 && diff < minDiff) {
+                        minDiff = diff;
+                        nextBusKey = key;
+                    }
+                }
+            });
+
+            flightKeys.forEach(function(key) {
+                var timeStr = String(stop[key] || "");
+                if (timeStr && timeStr.indexOf(':') !== -1) {
+                    var parts = timeStr.split(':');
+                    var displayTime = parts[0] + ":" + parts[1];
+                    
+                    var isNext = (key === nextBusKey);
+                    var rowClass = isNext ? 'class="next-bus"' : '';
+                    var remark = isNext ? ' <span style="color:#d90429; font-size:12px;">（次発）</span>' : '';
+                    tableHTML += '<tr ' + rowClass + '><td>' + key + '</td><td>' + displayTime + remark + '</td></tr>';
+                }
+            });
+        }
+        tableHTML += '</table>';
+
+        document.getElementById('info-content').innerHTML = 
+            '<h4 style="margin: 0 0 5px 0; color: #333; font-size: 1.4em;">' + stop.バス停 + '</h4>' +
+            '<span style="font-size: 0.85em; background: ' + markerColor + '; color: white; padding: 4px 10px; border-radius: 4px;">' + route + '</span>' +
+            tableHTML;
+    }
+</script>
+</body>
+</html>
