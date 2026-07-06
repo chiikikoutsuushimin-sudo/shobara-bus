@@ -9,14 +9,13 @@
         body, html { margin: 0; padding: 0; height: 100%; font-family: 'Meiryo', sans-serif; }
         #container { display: flex; width: 100%; height: 100%; }
         
-        /* スマホ対応：画面が狭い時はサイドバーの幅を調整 */
-        #sidebar { width: 340px; background: #f8f9fa; padding: 20px; box-sizing: border-box; overflow-y: auto; border-right: 1px solid #ccc; z-index: 1000; box-shadow: 2px 0 5px rgba(0,0,0,0.1); }
         @media (max-width: 768px) {
             #container { flex-direction: column-reverse; }
             #sidebar { width: 100%; height: 40%; border-right: none; border-top: 2px solid #0284c7; }
             #map { width: 100%; height: 60%; }
         }
 
+        #sidebar { width: 340px; background: #f8f9fa; padding: 20px; box-sizing: border-box; overflow-y: auto; border-right: 1px solid #ccc; z-index: 1000; box-shadow: 2px 0 5px rgba(0,0,0,0.1); }
         #map { flex-grow: 1; height: 100%; background: #e5e5e5; }
         h3 { margin-top: 0; border-bottom: 2px solid #0284c7; padding-bottom: 10px; color: #0f172a; }
         
@@ -66,7 +65,7 @@
 
         <div id="info-content" style="margin-top: 20px;">
             <div style="text-align: center; color: #64748b; font-size: 12px; padding: 20px;">
-                地図上のバス停マーク（🚏）をタップすると<br>時刻表が表示されます。
+                地図上のバス停マーク（🚏）をタップすると<br>時刻表が表示されます。<br><br>※右上のボタンで「衛星写真」に切り替え可能です。
             </div>
         </div>
     </div>
@@ -77,22 +76,39 @@
 <script src="./xlsx.full.min.js"></script>
 
 <script>
-    // ★設定：ここで読み込むエクセルファイルを指定します。複数ある場合はカンマで区切って追加できます。
-    // 例: ['./市内循環(ひまわり).xlsx', './別の路線.xlsx']
+    // ★重要★ 先ほどアップロードした東城のファイル名も一緒に読み込むよう追加しました！
     const targetFiles = [
         './市内循環(ひまわり).xlsx',
-        './口和定時定路線.xlsx'
+        './東城市街地循環バス(お通りバス).xlsx'
     ];
 
-    var map = L.map('map').setView([34.856, 133.015], 14);
+    // ★国土地理院の「標準地図」と「衛星写真」を定義
+    var stdMap = L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
+        maxZoom: 18,
+        attribution: "<a href='https://maps.gsi.go.jp/development/ichiran.html' target='_blank'>国土地理院</a>"
+    });
+
+    var photoMap = L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg', {
+        maxZoom: 18,
+        attribution: "<a href='https://maps.gsi.go.jp/development/ichiran.html' target='_blank'>国土地理院</a>"
+    });
+
+    // 最初に表示する地図を「標準地図（stdMap）」に設定してマップを作成
+    var map = L.map('map', {
+        center: [34.856, 133.015],
+        zoom: 14,
+        layers: [stdMap]
+    });
+
     var layerGroup = L.layerGroup().addTo(map);
     var activeBusesLayer = L.layerGroup().addTo(map); 
 
-    // ★変更：tilesフォルダではなく、国土地理院のオンラインサーバーから直接地図を取得
-    L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
-        maxZoom: 18,
-        attribution: "<a href='https://maps.gsi.go.jp/development/ichiran.html' target='_blank'>国土地理院</a>"
-    }).addTo(map);
+    // ★ユーザーが切り替えられるように右上にメニューを追加
+    var baseMaps = {
+        "標準地図": stdMap,
+        "航空・衛星写真": photoMap
+    };
+    L.control.layers(baseMaps).addTo(map);
 
     function createBusIcon(color) {
         return L.divIcon({
@@ -109,7 +125,6 @@
     var globalBusData = []; 
     var flightSettings = {}; 
 
-    // ★自動読み込み処理
     document.addEventListener("DOMContentLoaded", function() {
         updateDayModeBadge();
         loadExcelFiles();
@@ -128,23 +143,23 @@
                 
                 var sheetData = XLSX.utils.sheet_to_json(worksheet, {defval: "", raw: false});
                 
-                // ファイル名から「.xlsx」を取り除いて表示名にする
                 var fileNameParts = result.url.split('/');
                 var rawFileName = fileNameParts[fileNameParts.length - 1];
-                var displayName = rawFileName.replace(/\.xlsx?$/, '').replace(/\.csv$/, '');
+                var displayName = decodeURIComponent(rawFileName).replace(/\.xlsx?$/, '').replace(/\.csv$/, '');
                 
                 var cleanData = [];
                 flightSettings[displayName] = {}; 
                 
                 sheetData.forEach(function(row) {
-                    if (row["バス停"] === "【運行日】") {
+                    var stopName = row["バス停"] || "";
+                    if (stopName === "【運行日】") {
                         Object.keys(row).forEach(function(key) {
                             if (key.indexOf('便') !== -1) {
                                 flightSettings[displayName][key] = flightSettings[displayName][key] || {};
                                 flightSettings[displayName][key].activeDays = row[key];
                             }
                         });
-                    } else if (row["バス停"] === "【運休日】") {
+                    } else if (stopName === "【運休日】") {
                         Object.keys(row).forEach(function(key) {
                             if (key.indexOf('便') !== -1) {
                                 flightSettings[displayName][key] = flightSettings[displayName][key] || {};
@@ -159,7 +174,6 @@
                 globalBusData = globalBusData.concat(cleanData);
             });
 
-            // 読み込み完了後の処理
             document.getElementById('loading-overlay').style.display = 'none';
             drawUniversalMap(globalBusData); 
             buildSchedules(globalBusData);
@@ -167,7 +181,7 @@
 
         }).catch(err => {
             console.error(err);
-            document.getElementById('loading-overlay').innerHTML = `<div style="color:red; font-weight:bold;">ダイヤデータ（${targetFiles.join(', ')}）が見つかりません。<br>サーバーの設定を確認してください。</div>`;
+            document.getElementById('loading-overlay').innerHTML = `<div style="color:red; font-weight:bold;">ダイヤデータが見つかりません。<br>サーバーのエクセルファイル名を確認してください。</div>`;
         });
     }
 
@@ -210,7 +224,7 @@
         var daySetting = settingObj.activeDays || "毎日";
         var suspendSetting = settingObj.suspendDays || "";
         
-        var today = new Date(); // 完全リアルタイム
+        var today = new Date();
         
         if (isTodaySuspended(suspendSetting, today)) return false;
 
@@ -233,7 +247,6 @@
         var todayStr = ["日", "月", "火", "水", "木", "金", "土"][d];
         var isWknd = (d === 0 || d === 6);
         
-        // 祝日判定API等がないため、土日かどうかで簡易表示
         var dialyMode = isWknd ? "土日・休日ダイヤ" : "平日ダイヤ";
         
         badge.innerHTML = `📅 本日は <b>${dialyMode}</b>（${todayStr}曜）で運行中`;
@@ -242,7 +255,6 @@
         badge.style.color = isWknd ? "#991b1b" : "#166534";
     }
 
-    // 常に現在時刻を返す
     function getCurrentMinutes() {
         var now = new Date();
         return now.getHours() * 60 + now.getMinutes() + (now.getSeconds() / 60);
@@ -279,6 +291,7 @@
             });
 
             allPoints.push([lat, lon]);
+
             var markerColor = routes.length === 1 ? routeColors[routes[0]] : '#666666';
             var marker = L.marker([lat, lon], { icon: createBusIcon(markerColor) }).addTo(layerGroup);
             
@@ -424,7 +437,6 @@
         }
     }
 
-    // 5秒ごとに現在位置を更新（リアルタイム）
     setInterval(updateActiveBuses, 5000);
 
     function displayUniversalTimetable(stop, markerColor, route, displayName) {
