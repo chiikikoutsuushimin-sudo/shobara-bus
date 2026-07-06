@@ -76,13 +76,11 @@
 <script src="./xlsx.full.min.js"></script>
 
 <script>
-    // ★重要★ 先ほどアップロードした東城のファイル名も一緒に読み込むよう追加しました！
     const targetFiles = [
         './市内循環(ひまわり).xlsx',
         './東城市街地循環バス(お通りバス).xlsx'
     ];
 
-    // ★国土地理院の「標準地図」と「衛星写真」を定義
     var stdMap = L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
         maxZoom: 18,
         attribution: "<a href='https://maps.gsi.go.jp/development/ichiran.html' target='_blank'>国土地理院</a>"
@@ -93,7 +91,6 @@
         attribution: "<a href='https://maps.gsi.go.jp/development/ichiran.html' target='_blank'>国土地理院</a>"
     });
 
-    // 最初に表示する地図を「標準地図（stdMap）」に設定してマップを作成
     var map = L.map('map', {
         center: [34.856, 133.015],
         zoom: 14,
@@ -103,7 +100,6 @@
     var layerGroup = L.layerGroup().addTo(map);
     var activeBusesLayer = L.layerGroup().addTo(map); 
 
-    // ★ユーザーが切り替えられるように右上にメニューを追加
     var baseMaps = {
         "標準地図": stdMap,
         "航空・衛星写真": photoMap
@@ -119,7 +115,6 @@
 
     var routeColors = {};
     var routeSchedules = {}; 
-    var fileStats = {}; 
     var colorPalette = ['#e63946', '#457b9d', '#2a9d8f', '#f4a261', '#8338ec', '#ffb703', '#e76f51', '#219ebc'];
     
     var globalBusData = []; 
@@ -225,7 +220,6 @@
         var suspendSetting = settingObj.suspendDays || "";
         
         var today = new Date();
-        
         if (isTodaySuspended(suspendSetting, today)) return false;
 
         var d = today.getDay();
@@ -246,7 +240,6 @@
         var d = today.getDay();
         var todayStr = ["日", "月", "火", "水", "木", "金", "土"][d];
         var isWknd = (d === 0 || d === 6);
-        
         var dialyMode = isWknd ? "土日・休日ダイヤ" : "平日ダイヤ";
         
         badge.innerHTML = `📅 本日は <b>${dialyMode}</b>（${todayStr}曜）で運行中`;
@@ -277,30 +270,35 @@
             var lat = parseFloat(stop.Y);
             var lon = parseFloat(stop.X);
             var rawRoute = stop.ルート || "未分類";
+            var fName = stop.sourceFileDisplayName || "不明";
             if (isNaN(lat) || isNaN(lon)) return;
 
             var routes = rawRoute.split(/[,、]/).map(r => r.trim()).filter(r => r);
 
             routes.forEach(function(r) {
-                if (!routeCoords[r]) {
-                    routeCoords[r] = [];
-                    routeColors[r] = colorPalette[colorIndex % colorPalette.length];
+                var uniqueKey = fName + " - " + r;
+                if (!routeCoords[uniqueKey]) {
+                    routeCoords[uniqueKey] = [];
+                    routeColors[uniqueKey] = colorPalette[colorIndex % colorPalette.length];
                     colorIndex++;
                 }
-                routeCoords[r].push([lat, lon]);
+                routeCoords[uniqueKey].push([lat, lon]);
             });
 
             allPoints.push([lat, lon]);
 
-            var markerColor = routes.length === 1 ? routeColors[routes[0]] : '#666666';
-            var marker = L.marker([lat, lon], { icon: createBusIcon(markerColor) }).addTo(layerGroup);
-            
-            marker.on('click', function() { displayUniversalTimetable(stop, markerColor, rawRoute, stop.sourceFileDisplayName); });
+            if (stop.バス停.indexOf('【通過】') !== 0 && stop.バス停 !== '通過') {
+                var primaryKey = fName + " - " + routes[0];
+                var markerColor = routeColors[primaryKey] || '#666666';
+                var marker = L.marker([lat, lon], { icon: createBusIcon(markerColor) }).addTo(layerGroup);
+                
+                marker.on('click', function() { displayUniversalTimetable(stop, markerColor, rawRoute, fName); });
+            }
         });
 
-        for (var routeName in routeCoords) {
-            if (routeCoords[routeName].length > 1) {
-                L.polyline(routeCoords[routeName], {color: routeColors[routeName], weight: 5, opacity: 0.5}).addTo(layerGroup);
+        for (var uniqueKey in routeCoords) {
+            if (routeCoords[uniqueKey].length > 1) {
+                L.polyline(routeCoords[uniqueKey], {color: routeColors[uniqueKey], weight: 5, opacity: 0.5}).addTo(layerGroup);
             }
         }
         if (allPoints.length > 0) map.fitBounds(allPoints);
@@ -308,35 +306,32 @@
 
     function buildSchedules(busData) {
         routeSchedules = {};
-        fileStats = {}; 
         var routeStops = {};
         
         busData.forEach(function(stop) {
             var rawRoute = stop.ルート || "未分類";
-            var displayName = stop.sourceFileDisplayName || "不明";
+            var fName = stop.sourceFileDisplayName || "不明";
             
-            if (!fileStats[displayName]) {
-                fileStats[displayName] = { minTime: Infinity, maxTime: 0, isActive: false };
-            }
-
             var routes = rawRoute.split(/[,、]/).map(r => r.trim()).filter(r => r);
             routes.forEach(r => {
-                if (!routeStops[r]) routeStops[r] = { stops: [], sourceFile: displayName };
-                routeStops[r].stops.push(stop);
+                var uniqueKey = fName + " - " + r;
+                if (!routeStops[uniqueKey]) routeStops[uniqueKey] = { stops: [], sourceFile: fName, routeName: r };
+                routeStops[uniqueKey].stops.push(stop);
             });
         });
 
-        for (var route in routeStops) {
-            routeSchedules[route] = { sourceFile: routeStops[route].sourceFile, flights: [] };
-            var stops = routeStops[route].stops;
-            var displayName = routeStops[route].sourceFile;
+        for (var uniqueKey in routeStops) {
+            var stops = routeStops[uniqueKey].stops;
+            var fName = routeStops[uniqueKey].sourceFile;
+            var rName = routeStops[uniqueKey].routeName;
             
+            routeSchedules[uniqueKey] = { sourceFile: fName, routeName: rName, flights: [] };
             if (stops.length === 0) continue;
 
             var architecturalKeys = Object.keys(stops[0]);
             var allFlightKeys = architecturalKeys.filter(k => k.indexOf('便') !== -1);
             
-            var settings = flightSettings[displayName] || {};
+            var settings = flightSettings[fName] || {};
             
             var flightKeys = allFlightKeys.filter(function(key) {
                 return isFlightActiveToday(settings[key]);
@@ -359,13 +354,7 @@
                 
                 if (flightSchedule.length > 1) {
                     flightSchedule.sort((a, b) => a.time - b.time); 
-                    routeSchedules[route].flights.push({ flightName: key, stops: flightSchedule });
-                    
-                    var lastTime = flightSchedule[flightSchedule.length - 1].time;
-                    var firstTime = flightSchedule[0].time;
-                    
-                    if (lastTime > fileStats[displayName].maxTime) fileStats[displayName].maxTime = lastTime;
-                    if (firstTime < fileStats[displayName].minTime) fileStats[displayName].minTime = firstTime;
+                    routeSchedules[uniqueKey].flights.push({ flightName: key, stops: flightSchedule });
                 }
             });
         }
@@ -378,14 +367,10 @@
         var currentMinutes = getCurrentMinutes();
         var runningBusStrings = []; 
 
-        for (var fName in fileStats) {
-            fileStats[fName].isActive = false;
-        }
-
-        for (var route in routeSchedules) {
-            var routeColor = routeColors[route] || '#333';
-            var routeInfo = routeSchedules[route];
-            var displayName = routeInfo.sourceFile;
+        for (var uniqueKey in routeSchedules) {
+            var routeColor = routeColors[uniqueKey] || '#333';
+            var routeInfo = routeSchedules[uniqueKey];
+            var rName = routeInfo.routeName;
             
             routeInfo.flights.forEach(function(flight) {
                 var stops = flight.stops;
@@ -393,8 +378,6 @@
                 var endTime = stops[stops.length - 1].time;
 
                 if (currentMinutes >= startTime && currentMinutes <= endTime) {
-                    if (fileStats[displayName]) fileStats[displayName].isActive = true;
-
                     for (var i = 0; i < stops.length - 1; i++) {
                         var s1 = stops[i];
                         var s2 = stops[i+1];
@@ -413,12 +396,12 @@
                             
                             var marker = L.marker([currentLat, currentLon], {icon: busIcon, zIndexOffset: 1000}).addTo(activeBusesLayer);
                             
-                            var popupContent = `<div style="text-align:center;"><b>${route} ${flight.flightName}</b><br/><span style="color:#ffd166;">${s1.name}</span> 発<br/>⬇<br/><span style="font-size:10px; color:#aaa;">NEXT</span> <span style="color:#06d6a0; font-size:14px; font-weight:bold;">${s2.name}</span></div>`;
+                            var popupContent = `<div style="text-align:center;"><b>${rName} ${flight.flightName}</b><br/><span style="color:#ffd166;">${s1.name}</span> 発<br/>⬇<br/><span style="font-size:10px; color:#aaa;">NEXT</span> <span style="color:#06d6a0; font-size:14px; font-weight:bold;">${s2.name}</span></div>`;
                             marker.bindTooltip(popupContent, {permanent: true, direction: 'top', offset: [0, -20], className: 'bus-tooltip'}).openTooltip();
                             
                             var t1 = formatTime(s1.time);
                             var t2 = formatTime(s2.time);
-                            runningBusStrings.push(`<div class="status-item"><span style="color:${routeColor}; font-weight:bold;">${route}</span> ${flight.flightName} <br> ${s1.name} <span class="time-label">(${t1}発)</span> ➡ <b>${s2.name}</b> <span class="time-label">(${t2}着)</span></div>`);
+                            runningBusStrings.push(`<div class="status-item"><span style="color:${routeColor}; font-weight:bold;">${rName}</span> ${flight.flightName} <br> ${s1.name} <span class="time-label">(${t1}発)</span> ➡ <b>${s2.name}</b> <span class="time-label">(${t2}着)</span></div>`);
                             
                             break; 
                         }
@@ -489,6 +472,7 @@
 
         document.getElementById('info-content').innerHTML = 
             '<h4 style="margin: 0 0 5px 0; color: #333; font-size: 1.4em;">' + stop.バス停 + '</h4>' +
+            '<div style="font-size:11px; color:#64748b; margin-bottom:5px;">📄 路線: ' + displayName + '</div>' +
             '<span style="font-size: 0.85em; background: ' + markerColor + '; color: white; padding: 4px 10px; border-radius: 4px;">' + route + '</span>' +
             tableHTML;
     }
